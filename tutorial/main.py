@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from enum import Enum
+from pydantic import BaseModel
 
 app = FastAPI()
 
@@ -85,3 +86,30 @@ async def read_item(item_id: str, q: str | None = None, short: bool = False):
             {"description": "This is an amazing item that has a long description"}
         )
     return item
+
+# the JSON request body is used in almost every route. Either to get data or post it.
+# below is an item class, extending from the BaseModel class from fastAPI.
+# this class contains the relevant variables and data for the body.
+# The /items/ route now posts this item.
+
+class Item(BaseModel):
+    name: str
+    description: str | None = None
+    price: float
+    tax: float | None = None
+
+# @app.post("/items/")
+# async def create_item(item: Item):
+#     return item
+
+# below is an example on how to use the model.
+
+@app.post("/items/")
+async def create_item(item: Item):
+    # convert to plain dict from Pydantic model
+    item_dict = item.model_dump()
+    if item.tax is not None:
+        price_with_tax = item.price + item.tax
+        item_dict.update({"price_with_tax": price_with_tax})
+    return item_dict
+
