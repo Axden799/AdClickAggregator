@@ -1,0 +1,7 @@
+# Local dev services. Starts minimal and grows one service per slice
+# (Redis now; Postgres and the app container come in later slices).
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
