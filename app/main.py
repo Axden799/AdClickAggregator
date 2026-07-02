@@ -4,7 +4,7 @@ import redis.asyncio as redis
 from fastapi import FastAPI
 
 from app.config import settings
-from app.routers import clicks, health
+from app.routers import ads, clicks, health
 
 
 @asynccontextmanager
@@ -20,3 +20,4 @@ app = FastAPI(title="Ad Click Aggregator", lifespan=lifespan)
 
 app.include_router(health.router)
 app.include_router(clicks.router)
+app.include_router(ads.router)

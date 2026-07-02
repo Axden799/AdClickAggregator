@@ -6,6 +6,10 @@ class Settings(BaseSettings):
     (and a local .env if present). Add fields here as slices need them."""
 
     redis_url: str = "redis://localhost:6379"
+    # HMAC signing key for impressions. The dev default is fine locally, but
+    # production MUST override it via env — and it must stay CONSTANT across
+    # restarts, or previously-served impressions would fail verification.
+    secret_key: str = "dev-insecure-change-me"
 
     model_config = SettingsConfigDict(env_file=".env")
 
