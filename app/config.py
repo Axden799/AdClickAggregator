@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     # production MUST override it via env — and it must stay CONSTANT across
     # restarts, or previously-served impressions would fail verification.
     secret_key: str = "dev-insecure-change-me"
+    # How long (seconds) we remember an impression_id to reject replays.
+    # Bounds the dedup store's memory; impressions are short-lived, so a day
+    # is plenty (60 * 60 * 24 = 86400).
+    dedup_ttl: int = 86400
 
     model_config = SettingsConfigDict(env_file=".env")
 
