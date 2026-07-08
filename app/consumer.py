@@ -29,37 +29,73 @@ async def ensure_group(r: redis.Redis) -> None:
         log.info("consumer group %r already exists", GROUP)
 
 
-def process(entry_id: str, fields: dict) -> None:
-    # 5a: just log the drained click to prove the pipe works end to end.
-    # 5b replaces this with real aggregation (time windowing + ZINCRBY).
-    log.info("processed click %s: %s", entry_id, fields)
+def minute_bucket(entry_id: str) -> int:
+    """Map a stream entry to its one-minute window label.
+
+    Redis stream IDs look like '<milliseconds>-<seq>', e.g. '1783357460733-0'.
+    The millisecond prefix IS the click's ingestion time. Floor it to a whole
+    minute since the epoch — that integer is the bucket's name.
+
+    TODO (you):
+      1. split entry_id on '-', take the first part (the ms), wrap it in int()
+      2. turn ms -> minutes: divide by 1000 (-> seconds), then by 60, using //
+      3. return the resulting integer
+    """
+    timestamp = (int(entry_id.split('-')[0]) // 1000) // 60
+    return timestamp
+
+
+async def aggregate(r: redis.Redis, entry_id: str, fields: dict) -> None:
+    """Count one click into its per-minute sorted set (this is 5b's core).
+
+    TODO (you):
+      1. minute = minute_bucket(entry_id)
+      2. ad_id  = fields["ad_id"]
+      3. ZINCRBY the bucket by 1 for that ad. The key is f"ad_clicks:{minute}".
+         redis-py signature is zincrby(name, amount, value) — remember to await.
+    """
+    minute = minute_bucket(entry_id)
+    resp = await r.zincrby(f"ad_clicks:{minute}", 1, fields["ad_id"])
+
+
+async def consume_once(r: redis.Redis, block: int = 5000) -> int:
+    """Run exactly one read -> aggregate -> ack cycle.
+
+    Returns how many entries were processed (0 if the block timed out with
+    nothing new). Pulling the loop body out of the infinite loop is what makes
+    the consumer testable: a test can seed the stream, call consume_once once,
+    and assert on the outcome — no unstoppable while-loop."""
+    # '>' = entries never delivered to this group. Returns
+    # [[stream, [(entry_id, {fields}), ...]]], or None on block timeout.
+    resp = await r.xreadgroup(GROUP, CONSUMER, {STREAM: ">"}, count=10, block=block)
+    if not resp:
+        return 0
+
+    processed = 0
+    for _stream, entries in resp:
+        for entry_id, fields in entries:
+            await aggregate(r, entry_id, fields)
+            # Ack only AFTER a successful aggregate: if aggregate raises, the
+            # entry stays pending and replays on the next run (at-least-once).
+            acked = await r.xack(STREAM, GROUP, entry_id)
+            if not acked:
+                log.warning("XACK returned 0 for %s — entry was not pending", entry_id)
+            processed += 1
+    return processed
 
 
 async def consume() -> None:
     # socket_timeout=None: redis-py 8.0 defaults it to 5s, which would kill a
-    # blocking XREADGROUP that sits idle waiting for the next click. A long-lived
-    # stream consumer must never socket-timeout while blocking — the block=
+    # blocking XREADGROUP that sits idle waiting for the next click. The block=
     # argument alone governs how long we wait.
     r = redis.from_url(settings.redis_url, decode_responses=True, socket_timeout=None)
     await ensure_group(r)
     log.info("consumer %r draining stream %r ...", CONSUMER, STREAM)
 
     while True:
-        # Read up to 10 new entries for this group, blocking up to 5s. '>' means
-        # "entries never delivered to this group". Returns
-        # [[stream, [(entry_id, {fields}), ...]]], or None on timeout.
-        resp = await r.xreadgroup(GROUP, CONSUMER, {STREAM: ">"}, count=10, block=5000)
-
-        if not resp:
-            continue  # block timed out with no new entries — loop again
-
-        for _stream, entries in resp:
-            for entry_id, fields in entries:
-                process(entry_id, fields)
-                # Acknowledge: removes the entry from this group's pending list.
-                acked = await r.xack(STREAM, GROUP, entry_id)
-                if not acked:
-                    log.warning("XACK returned 0 for %s — entry was not pending", entry_id)
+        n = await consume_once(r)
+        if n:
+            log.info("aggregated %d click(s)", n)
 
 
 if __name__ == "__main__":
