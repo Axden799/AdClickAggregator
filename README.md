@@ -18,6 +18,18 @@ The design is adapted from the [HelloInterview Ad Click Aggregator](https://www.
 
 ---
 
+## Status
+
+This README describes the **full target design**. The project is built incrementally — one thin vertical slice per commit — and roughly half the pipeline is implemented today:
+
+- **Working now:** the serve endpoint with HMAC-signed impressions, click ingestion (HMAC verify → impression dedup → `XADD`), and the async aggregation consumer (consumer-group `XREADGROUP` → `ZINCRBY` into per-minute sorted sets → `XACK`) — all covered by a 10-test async suite.
+- **In progress:** the metrics query endpoint (`GET /ads/{ad_id}/metrics`) — the Redis sorted-set read path.
+- **Designed, not yet built:** PostgreSQL `Ad`/`ClickMetric` models + migrations, the consumer's flush to Postgres and sorted-set retention, the click→destination `302` redirect, the load simulator, the frontend, and the full multi-service Docker Compose stack.
+
+See [Build status](#build-status) for the exact ledger. Note that some behaviors below describe the target (e.g. `/click` will `302`-redirect once the `Ad` model exists; today it returns `202 Accepted`).
+
+---
+
 ## System overview
 
 ```
@@ -240,11 +252,8 @@ An exact Redis SET with per-key TTL is simple and correct at this scale. A bloom
 # Activate venv
 source venv/bin/activate
 
-# Run the API (current skeleton: hello-world in root main.py)
-fastapi dev main.py
-# or, equivalently:
-uvicorn main:app --reload
-# (grows into app/main.py as the package structure is built out)
+# Run the API
+uvicorn app.main:app --reload
 
 # Run the aggregation consumer (separate process)
 python -m app.consumer
@@ -281,13 +290,17 @@ venv/bin/pip freeze > requirements.txt
 
 | Stage | Status |
 |---|---|
-| FastAPI app skeleton (`main.py` hello-world) | Done |
-| Data model (`Ad`, `ClickMetric`) + migrations | Not started |
-| Serve endpoint + impression signing | Not started |
-| Click ingestion (verify → dedup → XADD → redirect) | Not started |
-| Aggregation consumer (XREADGROUP → sorted sets → flush → XACK) | Not started |
-| Metrics query (hot + cold path) | Not started |
+| FastAPI app (`app/main.py`, lifespan-managed Redis, routers) | Done |
+| Serve endpoint + HMAC impression signing | Done |
+| Click ingestion (verify → dedup → XADD) | Done |
+| Aggregation consumer (XREADGROUP → ZINCRBY sorted sets → XACK) | Done |
+| Async test suite (10 tests: health, HMAC, ingestion/dedup, consumer) | Done |
+| Docker Compose (Redis service) | Done |
+| Metrics query — Redis hot-read path | In progress |
+| Click → destination `302` redirect | Not started |
+| Data model (`Ad`, `ClickMetric`) + Alembic migrations | Not started |
+| Consumer flush to Postgres (cold storage) + sorted-set retention | Not started |
+| Metrics query — Postgres cold path | Not started |
 | Load simulator | Not started |
 | Frontend (ad + analytics chart) | Not started |
-| Docker Compose stack | Not started |
-| Tests | Not started |
+| Full Docker Compose stack (app + consumer + Redis + Postgres) | Not started |
