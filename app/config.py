@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # Bounds the dedup store's memory; impressions are short-lived, so a day
     # is plenty (60 * 60 * 24 = 86400).
     dedup_ttl: int = 86400
+    # PostgreSQL connection. The '+asyncpg' dialect selects the async driver.
+    # Matches the docker-compose postgres service (user/pass/db all 'adclick').
+    database_url: str = "postgresql+asyncpg://adclick:adclick@localhost:5433/adclick"
 
     model_config = SettingsConfigDict(env_file=".env")
 
