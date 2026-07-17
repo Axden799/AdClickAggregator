@@ -1,9 +1,14 @@
 import asyncio
 import logging
+import time
+from datetime import datetime, timezone
 
 import redis.asyncio as redis
+from sqlalchemy.dialects.postgresql import insert
 
 from app.config import settings
+from app.database import async_session
+from app.models import ClickMetric
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
 log = logging.getLogger("consumer")
@@ -11,6 +16,9 @@ log = logging.getLogger("consumer")
 STREAM = "clicks"
 GROUP = "aggregators"
 CONSUMER = "worker-1"
+# Set of minute buckets that have unflushed click data — the flush loop's
+# to-do list. The consumer SADDs a minute here whenever it counts a click.
+PENDING = "pending_minutes"
 
 
 async def ensure_group(r: redis.Redis) -> None:
@@ -55,7 +63,11 @@ async def aggregate(r: redis.Redis, entry_id: str, fields: dict) -> None:
          redis-py signature is zincrby(name, amount, value) — remember to await.
     """
     minute = minute_bucket(entry_id)
-    resp = await r.zincrby(f"ad_clicks:{minute}", 1, fields["ad_id"])
+    await r.zincrby(f"ad_clicks:{minute}", 1, fields["ad_id"])
+    # Mark this minute as having unflushed data, so the flush loop knows to
+    # look at it. SADD is idempotent — touching the same minute many times
+    # leaves exactly one entry.
+    await r.sadd(PENDING, minute)
 
 
 async def consume_once(r: redis.Redis, block: int = 5000) -> int:
@@ -84,18 +96,102 @@ async def consume_once(r: redis.Redis, block: int = 5000) -> int:
     return processed
 
 
+async def flush_minute(r: redis.Redis, minute: int) -> int:
+    """Copy one closed minute's counts from Redis into click_metric, then drop
+    it from the pending set. Returns how many (ad, count) rows were written.
+
+    The UPSERT (ON CONFLICT ... DO UPDATE) makes this idempotent: re-flushing
+    the same minute overwrites the row rather than duplicating it, because the
+    sorted set holds the authoritative total for that minute (not a delta)."""
+    # Read every (ad_id, score) pair in this minute's bucket.
+    counts = await r.zrange(f"ad_clicks:{minute}", 0, -1, withscores=True)
+    if counts:
+        bucket_ts = datetime.fromtimestamp(minute * 60, tz=timezone.utc)
+        rows = [
+            {"ad_id": int(ad_id), "minute_bucket": bucket_ts, "click_count": int(score)}
+            for ad_id, score in counts
+        ]
+        stmt = insert(ClickMetric).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["ad_id", "minute_bucket"],
+            set_={"click_count": stmt.excluded.click_count},
+        )
+        async with async_session() as session:
+            await session.execute(stmt)
+            await session.commit()
+
+    # Cross this minute off the to-do list. Do this AFTER the commit: if the
+    # flush crashed above, the minute stays pending and is retried next tick.
+    await r.srem(PENDING, minute)
+    return len(counts)
+
+
+async def flush_once(r: redis.Redis, now: float | None = None) -> int:
+    """One flush pass: flush every pending minute that has closed (ended more
+    than flush_grace_seconds ago). Returns the number of minutes flushed.
+
+    now is injectable so tests can pin the clock instead of sleeping.
+
+    TODO (you): implement the watermark filter.
+      1. now = now if now is not None else time.time()
+      2. The newest minute-bucket we're allowed to flush:
+             cutoff = int(now - settings.flush_grace_seconds) // 60
+         (a minute is eligible only once it ended >= grace seconds ago)
+      3. pending = await r.smembers(PENDING)   # a set of stringified ints
+      4. for each m in pending:
+             minute = int(m)
+             if minute < cutoff:      # closed -> safe to flush
+                 await flush_minute(r, minute)
+                 count it
+      5. return how many minutes you flushed.
+    """
+    now = now if now is not None else time.time()
+    cutoff = int(now - settings.flush_grace_seconds) // 60
+    pending = await r.smembers(PENDING)
+    flushed = 0
+    for m in pending:
+        minute = int(m)
+        if minute < cutoff:
+            try:
+                await flush_minute(r, minute)
+                flushed += 1
+            except Exception:
+                # One bad minute (e.g. a bad ad_id) must not take down the
+                # whole consumer. Log it and move on; flush_minute leaves the
+                # minute in PENDING on failure, so the next tick retries it.
+                log.exception("flush failed for minute %d — skipping", minute)
+    return flushed
+
+
+async def drain_loop(r: redis.Redis) -> None:
+    """Forever: drain the stream into per-minute sorted sets."""
+    while True:
+        n = await consume_once(r)
+        if n:
+            log.info("aggregated %d click(s)", n)
+
+
+async def flush_loop(r: redis.Redis) -> None:
+    """Forever: every flush_interval_seconds, roll closed minutes to Postgres."""
+    while True:
+        flushed = await flush_once(r)
+        if flushed:
+            log.info("flushed %d closed minute(s) to postgres", flushed)
+        await asyncio.sleep(settings.flush_interval_seconds)
+
+
 async def consume() -> None:
     # socket_timeout=None: redis-py 8.0 defaults it to 5s, which would kill a
     # blocking XREADGROUP that sits idle waiting for the next click. The block=
     # argument alone governs how long we wait.
     r = redis.from_url(settings.redis_url, decode_responses=True, socket_timeout=None)
     await ensure_group(r)
-    log.info("consumer %r draining stream %r ...", CONSUMER, STREAM)
+    log.info("consumer %r draining stream %r + flushing every %ds ...",
+             CONSUMER, STREAM, settings.flush_interval_seconds)
 
-    while True:
-        n = await consume_once(r)
-        if n:
-            log.info("aggregated %d click(s)", n)
+    # Run the drain and the flush concurrently on the same event loop. gather
+    # keeps both alive; if either raises, it propagates and the process exits.
+    await asyncio.gather(drain_loop(r), flush_loop(r))
 
 
 if __name__ == "__main__":

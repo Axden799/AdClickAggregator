@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     # PostgreSQL connection. The '+asyncpg' dialect selects the async driver.
     # Matches the docker-compose postgres service (user/pass/db all 'adclick').
     database_url: str = "postgresql+asyncpg://adclick:adclick@localhost:5433/adclick"
+    # Flush (roll-up) tuning.
+    # grace: a minute isn't flushed until it ended this many seconds ago, so
+    #   lagging clicks have time to land before we call the minute "final".
+    # interval: how often the flush loop wakes to check for eligible minutes.
+    flush_grace_seconds: int = 90
+    flush_interval_seconds: int = 10
 
     model_config = SettingsConfigDict(env_file=".env")
 

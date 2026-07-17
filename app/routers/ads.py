@@ -16,11 +16,14 @@ router = APIRouter(prefix="/ads", tags=["ads"])
 # 1440 ZSCOREs; the cap stops someone asking for a year (525k reads).
 MAX_RANGE = timedelta(hours=24)
 
-# Temporary in-memory ad source. Stands in for the Ad table until the Postgres
-# model slice — it lets us serve and sign impressions without a database yet.
+# In-memory serve list. Ids MUST match the seeded ad rows (app/seed.py) so
+# every click's ad_id exists in the ad table before the flush writes a metric.
+# (A later slice can read these straight from the DB.)
 _FAKE_ADS = [
     {"id": 1, "image_url": "https://placehold.co/300x250?text=Buy+Widgets"},
     {"id": 2, "image_url": "https://placehold.co/300x250?text=Cloud+Sale"},
+    {"id": 3, "image_url": "https://placehold.co/300x250?text=Fast+VPN"},
+    {"id": 4, "image_url": "https://placehold.co/300x250?text=Learn+Python"},
 ]
 
 

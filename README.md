@@ -258,6 +258,9 @@ uvicorn app.main:app --reload
 # Run the aggregation consumer (separate process)
 python -m app.consumer
 
+# Seed the ad table (idempotent; run once so click_metric's FK has ads)
+python -m app.seed
+
 # Tests
 pytest
 pytest tests/test_clicks.py -v
@@ -271,6 +274,25 @@ docker compose up
 
 # Freeze dependencies after any pip install
 venv/bin/pip freeze > requirements.txt
+```
+
+### Inspecting state
+
+```bash
+# --- Redis (all via: docker compose exec redis redis-cli <cmd>) ---
+SMEMBERS pending_minutes                 # minutes with unflushed data (flush to-do list)
+KEYS 'ad_clicks:*'                       # which per-minute count buckets exist
+ZRANGE ad_clicks:<minute> 0 -1 WITHSCORES  # a minute's counts (member=ad_id, score=clicks)
+XLEN clicks                              # raw click-stream length
+XRANGE clicks - +                        # dump the raw click stream
+KEYS 'imp:*'                             # dedup markers (impression ids seen)
+XINFO GROUPS clicks                      # consumer-group state
+XPENDING clicks aggregators              # unacked (pending) stream entries
+
+# --- Postgres (all via: docker compose exec postgres psql -U adclick -d adclick -c "<sql>") ---
+\dt                                      # list tables
+SELECT id, name FROM ad;                 # seeded ads
+SELECT ad_id, minute_bucket, click_count FROM click_metric ORDER BY minute_bucket;  # roll-ups
 ```
 
 ## Environment variables (`.env`, not committed)
