@@ -55,6 +55,8 @@ async def serve_ad(r: Annotated[redis.Redis, Depends(get_redis)]):
 class MetricPoint(BaseModel):
     timestamp: datetime  # start of the one-minute bucket, UTC
     clicks: int
+    impressions: int
+    ctr: float  # clicks / impressions (0.0 when there were no impressions)
 
 
 class MetricsResponse(BaseModel):
@@ -66,6 +68,14 @@ def _bucket_to_timestamp(minute: int) -> datetime:
     """Turn a minute-bucket integer back into the UTC datetime at its start —
     the inverse of the consumer's `ms // 1000 // 60`."""
     return datetime.fromtimestamp(minute * 60, tz=timezone.utc)
+
+
+def _overlay(hot: float | None, cold: int) -> int:
+    """Resolve one metric for one minute: the hot (Redis) value wins if present
+    (it's the freshest live count), otherwise fall back to the cold (Postgres)
+    value. Encapsulates the tier-priority rule so we apply it identically to
+    clicks and impressions."""
+    return int(hot) if hot is not None else cold
 
 
 @router.get("/{ad_id}/metrics", response_model=MetricsResponse)
@@ -89,36 +99,53 @@ async def ad_metrics(
     end = int(to.timestamp()) // 60
 
     # --- Cold tier: one query pulls every rolled-up minute in range from
-    # Postgres. We key the result by minute-INTEGER (not datetime) so it lines
-    # up with Redis's minute space for the merge below.
+    # Postgres — now BOTH counts. We key by minute-INTEGER (not datetime) so it
+    # lines up with Redis's minute space, and store a (clicks, impressions) pair.
     result = await db.execute(
-        select(ClickMetric.minute_bucket, ClickMetric.click_count).where(
+        select(
+            ClickMetric.minute_bucket,
+            ClickMetric.click_count,
+            ClickMetric.impression_count,
+        ).where(
             ClickMetric.ad_id == ad_id,
             ClickMetric.minute_bucket >= from_,
             ClickMetric.minute_bucket <= to,
         )
     )
     pg_counts = {
-        int(minute_bucket.timestamp()) // 60: count
-        for minute_bucket, count in result.all()
+        int(minute_bucket.timestamp()) // 60: (clicks, impressions)
+        for minute_bucket, clicks, impressions in result.all()
     }
 
-    # --- Merge: Redis (hot) overlays Postgres (cold).
-    # TODO (you): for each minute in range(start, end + 1), decide its count:
-    #   1. score = await r.zscore(f"ad_clicks:{minute}", str(ad_id))
-    #   2. if score is not None:  clicks = int(score)      # Redis WINS (freshest)
-    #      elif minute in pg_counts:  clicks = pg_counts[minute]  # else cold value
-    #      else:  clicks = 0                                # neither tier has it
-    #   3. append MetricPoint(timestamp=_bucket_to_timestamp(minute), clicks=clicks)
+    # --- Merge: Redis (hot) overlays Postgres (cold), for BOTH metrics.
+    # Use _overlay(hot, cold) for each: it applies the "Redis wins, else
+    # Postgres" rule. The cold fallback comes from pg_counts (default (0, 0)).
+    #
+    # TODO (you): for each minute in range(start, end + 1):
+    #   1. pg_clicks, pg_impressions = pg_counts.get(minute, (0, 0))
+    #   2. clicks = _overlay(await r.zscore(f"ad_clicks:{minute}", str(ad_id)),
+    #                        pg_clicks)
+    #   3. impressions = _overlay(
+    #          await r.zscore(f"ad_impressions:{minute}", str(ad_id)),
+    #          pg_impressions)
+    #   4. ctr = clicks / impressions if impressions > 0 else 0.0   # avoid /0
+    #   5. append MetricPoint(timestamp=_bucket_to_timestamp(minute),
+    #             clicks=clicks, impressions=impressions, ctr=ctr)
     points: list[MetricPoint] = []
     for minute in range(start, end + 1):
-        score = await r.zscore(f"ad_clicks:{minute}", str(ad_id))
-        if score is not None:
-            clicks = int(score)
-        elif minute in pg_counts:
-            clicks = pg_counts[minute]
-        else:
-            clicks = 0
-        points.append(MetricPoint(timestamp=_bucket_to_timestamp(minute), clicks=clicks))
+        pg_clicks, pg_impressions = pg_counts.get(minute, (0, 0))
+        clicks = _overlay(await r.zscore(f"ad_clicks:{minute}", str(ad_id)), pg_clicks)
+        impressions = _overlay(
+            await r.zscore(f"ad_impressions:{minute}", str(ad_id)),
+            pg_impressions
+        )
+        ctr = clicks / impressions if impressions > 0 else 0.0
+        points.append(
+            MetricPoint(
+                timestamp=_bucket_to_timestamp(minute),
+                clicks=clicks,
+                impressions=impressions,
+                ctr=ctr)
+            )
 
     return MetricsResponse(ad_id=str(ad_id), points=points)

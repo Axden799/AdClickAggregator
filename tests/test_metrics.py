@@ -107,3 +107,49 @@ async def test_metrics_redis_overlays_postgres(client, redis_client, db_session)
     assert resp.status_code == 200
     points = resp.json()["points"]
     assert len(points) == 1 and points[0]["clicks"] == 7
+
+
+# --- 8b: impressions + CTR ----------------------------------------------------
+
+
+async def test_metrics_reports_impressions_and_ctr(client, redis_client, db_session):
+    # Arrange: a cold row with 3 clicks out of 50 impressions -> CTR 0.06.
+    db_session.add(ClickMetric(
+        ad_id=TEST_AD_ID, minute_bucket=WHEN, click_count=3, impression_count=50,
+    ))
+    await db_session.commit()
+
+    resp = await client.get(
+        f"/ads/{TEST_AD_ID}/metrics",
+        params={"from": "2026-02-01T10:00:00Z", "to": "2026-02-01T10:00:00Z"},
+    )
+
+    # Assert (you): 200, one point with clicks == 3, impressions == 50, and
+    # ctr == 0.06 (3 / 50). p = resp.json()["points"][0]
+    assert resp.status_code == 200
+    points = resp.json()["points"]
+    p = points[0]
+    ctr = p["clicks"] / p["impressions"]
+    assert len(points) == 1 and p["clicks"] == 3 and p["impressions"] == 50 and p["ctr"] == ctr
+
+
+async def test_metrics_ctr_is_zero_with_no_impressions(client, redis_client, db_session):
+    # TODO (you): a row with impression_count == 0 must NOT raise ZeroDivision —
+    # it should report ctr == 0.0. Seed a ClickMetric with click_count=0,
+    # impression_count=0 (or just impressions 0), query, and assert the point's
+    # ctr == 0.0 and impressions == 0.
+    db_session.add(ClickMetric(
+        ad_id=TEST_AD_ID, minute_bucket=WHEN, click_count=5, impression_count=0,
+    ))
+    await db_session.commit()
+
+    resp = await client.get(
+        f"/ads/{TEST_AD_ID}/metrics",
+        params={"from": "2026-02-01T10:00:00Z", "to": "2026-02-01T10:00:00Z"},
+    )
+
+    assert resp.status_code == 200
+    points = resp.json()["points"]
+    p = points[0]
+    ctr = 0.0
+    assert len(points) == 1 and p["clicks"] == 5 and p["impressions"] == 0 and p["ctr"] == ctr
