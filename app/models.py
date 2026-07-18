@@ -47,5 +47,8 @@ class ClickMetric(Base):
     ad_id: Mapped[int] = mapped_column(ForeignKey("ad.id"), index=True)
     minute_bucket: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     click_count: Mapped[int]
+    # Impressions (ad shown) for this ad+minute. server_default="0" so the
+    # migration can backfill existing rows without a NULL violation.
+    impression_count: Mapped[int] = mapped_column(server_default="0")
 
     __table_args__ = (UniqueConstraint("ad_id", "minute_bucket"),)

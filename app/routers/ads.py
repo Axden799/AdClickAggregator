@@ -32,13 +32,18 @@ _FAKE_ADS = [
 
 
 @router.get("/serve")
-async def serve_ad():
+async def serve_ad(r: Annotated[redis.Redis, Depends(get_redis)]):
     ad = random.choice(_FAKE_ADS)
     impression_id = uuid.uuid4().hex
     sig = sign_impression(impression_id, ad["id"])
     click_url = (
         f"/click?ad_id={ad['id']}&impression_id={impression_id}&sig={sig}"
     )
+    # An impression = this ad was shown. Emit it onto the impressions stream so
+    # the consumer counts it, exactly like /click emits onto the clicks stream.
+    # TODO (you): XADD to the "impressions" stream with {"ad_id": ad["id"]}.
+    #   await r.xadd("impressions", {"ad_id": ad["id"]})
+    await r.xadd("impressions", {"ad_id": ad["id"]})
     return {"ad_id": ad["id"], "image_url": ad["image_url"], "click_url": click_url}
 
 

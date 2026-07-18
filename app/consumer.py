@@ -14,27 +14,34 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)
 log = logging.getLogger("consumer")
 
 STREAM = "clicks"
+IMPRESSION_STREAM = "impressions"
 GROUP = "aggregators"
 CONSUMER = "worker-1"
-# Set of minute buckets that have unflushed click data — the flush loop's
-# to-do list. The consumer SADDs a minute here whenever it counts a click.
+# Set of minute buckets that have unflushed data (clicks OR impressions) — the
+# flush loop's to-do list. Aggregators SADD a minute here whenever they touch it.
 PENDING = "pending_minutes"
 
 
-async def ensure_group(r: redis.Redis) -> None:
-    """Create the consumer group if it doesn't already exist.
-
-    mkstream=True also creates the stream, so the worker can boot before any
-    click arrives. id='0' starts the group at the beginning of the stream, so
-    we never skip clicks that landed before the worker started."""
+async def _create_group(r: redis.Redis, stream: str) -> None:
+    """Create GROUP on one stream if it doesn't already exist. mkstream=True
+    also creates the stream, so the worker can boot before any event arrives;
+    id='0' starts at the beginning so we never skip events that predated us."""
     try:
-        await r.xgroup_create(STREAM, GROUP, id="0", mkstream=True)
-        log.info("created consumer group %r on stream %r", GROUP, STREAM)
+        await r.xgroup_create(stream, GROUP, id="0", mkstream=True)
+        log.info("created consumer group %r on stream %r", GROUP, stream)
     except redis.ResponseError as e:
         # BUSYGROUP = the group already exists; any other error is real.
         if "BUSYGROUP" not in str(e):
             raise
-        log.info("consumer group %r already exists", GROUP)
+        log.info("consumer group %r already exists on %r", GROUP, stream)
+
+
+async def ensure_group(r: redis.Redis) -> None:
+    """Ensure the group exists on BOTH streams. XREADGROUP reads clicks and
+    impressions together, and it errors (NOGROUP) if the group is missing on
+    any stream it's asked to read — so both must be created up front."""
+    await _create_group(r, STREAM)
+    await _create_group(r, IMPRESSION_STREAM)
 
 
 def minute_bucket(entry_id: str) -> int:
@@ -70,26 +77,48 @@ async def aggregate(r: redis.Redis, entry_id: str, fields: dict) -> None:
     await r.sadd(PENDING, minute)
 
 
+async def aggregate_impression(r: redis.Redis, entry_id: str, fields: dict) -> None:
+    """Count one impression into its per-minute sorted set — the exact mirror
+    of aggregate(), but into the ad_impressions:{minute} key.
+
+    TODO (you): same three steps as aggregate(), just a different key:
+      1. minute = minute_bucket(entry_id)
+      2. ZINCRBY f"ad_impressions:{minute}" by 1 for fields["ad_id"]
+      3. SADD the minute to PENDING (a minute needs flushing if EITHER a click
+         OR an impression touched it — same shared to-do list).
+    """
+    minute = minute_bucket(entry_id)
+    await r.zincrby(f"ad_impressions:{minute}", 1, fields["ad_id"])
+    await r.sadd(PENDING, minute)
+
+
 async def consume_once(r: redis.Redis, block: int = 5000) -> int:
-    """Run exactly one read -> aggregate -> ack cycle.
+    """Run exactly one read -> aggregate -> ack cycle across BOTH streams.
 
     Returns how many entries were processed (0 if the block timed out with
     nothing new). Pulling the loop body out of the infinite loop is what makes
-    the consumer testable: a test can seed the stream, call consume_once once,
+    the consumer testable: a test can seed a stream, call consume_once once,
     and assert on the outcome — no unstoppable while-loop."""
-    # '>' = entries never delivered to this group. Returns
-    # [[stream, [(entry_id, {fields}), ...]]], or None on block timeout.
-    resp = await r.xreadgroup(GROUP, CONSUMER, {STREAM: ">"}, count=10, block=block)
+    # Read new entries from both streams in one call. '>' = never-delivered.
+    # Returns [[stream, [(entry_id, {fields}), ...]], ...] — one sub-list per
+    # stream that had data — or None on block timeout.
+    resp = await r.xreadgroup(
+        GROUP, CONSUMER, {STREAM: ">", IMPRESSION_STREAM: ">"}, count=10, block=block
+    )
     if not resp:
         return 0
 
     processed = 0
-    for _stream, entries in resp:
+    for stream, entries in resp:
         for entry_id, fields in entries:
-            await aggregate(r, entry_id, fields)
-            # Ack only AFTER a successful aggregate: if aggregate raises, the
-            # entry stays pending and replays on the next run (at-least-once).
-            acked = await r.xack(STREAM, GROUP, entry_id)
+            # Route by which stream the entry came from.
+            if stream == STREAM:
+                await aggregate(r, entry_id, fields)
+            else:
+                await aggregate_impression(r, entry_id, fields)
+            # Ack on the SAME stream we read from, only after a successful
+            # aggregate (so a failure replays the entry — at-least-once).
+            acked = await r.xack(stream, GROUP, entry_id)
             if not acked:
                 log.warning("XACK returned 0 for %s — entry was not pending", entry_id)
             processed += 1
@@ -103,18 +132,30 @@ async def flush_minute(r: redis.Redis, minute: int) -> int:
     The UPSERT (ON CONFLICT ... DO UPDATE) makes this idempotent: re-flushing
     the same minute overwrites the row rather than duplicating it, because the
     sorted set holds the authoritative total for that minute (not a delta)."""
-    # Read every (ad_id, score) pair in this minute's bucket.
-    counts = await r.zrange(f"ad_clicks:{minute}", 0, -1, withscores=True)
-    if counts:
+    # Read both sorted sets for this minute as {ad_id: count} dicts. An ad may
+    # appear in one, the other, or both (impressions without a click are common).
+    clicks = dict(await r.zrange(f"ad_clicks:{minute}", 0, -1, withscores=True))
+    impressions = dict(await r.zrange(f"ad_impressions:{minute}", 0, -1, withscores=True))
+
+    ad_ids = set(clicks) | set(impressions)  # union: every ad touched this minute
+    if ad_ids:
         bucket_ts = datetime.fromtimestamp(minute * 60, tz=timezone.utc)
         rows = [
-            {"ad_id": int(ad_id), "minute_bucket": bucket_ts, "click_count": int(score)}
-            for ad_id, score in counts
+            {
+                "ad_id": int(ad_id),
+                "minute_bucket": bucket_ts,
+                "click_count": int(clicks.get(ad_id, 0)),
+                "impression_count": int(impressions.get(ad_id, 0)),
+            }
+            for ad_id in ad_ids
         ]
         stmt = insert(ClickMetric).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=["ad_id", "minute_bucket"],
-            set_={"click_count": stmt.excluded.click_count},
+            set_={
+                "click_count": stmt.excluded.click_count,
+                "impression_count": stmt.excluded.impression_count,
+            },
         )
         async with async_session() as session:
             await session.execute(stmt)
@@ -123,7 +164,7 @@ async def flush_minute(r: redis.Redis, minute: int) -> int:
     # Cross this minute off the to-do list. Do this AFTER the commit: if the
     # flush crashed above, the minute stays pending and is retried next tick.
     await r.srem(PENDING, minute)
-    return len(counts)
+    return len(ad_ids)
 
 
 async def flush_once(r: redis.Redis, now: float | None = None) -> int:
