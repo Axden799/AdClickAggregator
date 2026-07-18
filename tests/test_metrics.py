@@ -1,5 +1,8 @@
 from datetime import datetime, timezone
 
+from app.models import ClickMetric
+from tests.conftest import TEST_AD_ID
+
 
 def _minute_of(dt: datetime) -> int:
     """The bucket integer for a datetime — the same math the endpoint uses."""
@@ -63,3 +66,44 @@ async def test_metrics_rejects_too_large_range(client):
         params={"from": "2026-01-01T00:00:00Z", "to": "2026-01-03T00:00:00Z"},
     )
     assert resp.status_code == 400
+
+
+# --- 7d: tiered read (Postgres cold path + Redis overlay) ---------------------
+# These use TEST_AD_ID (the db_session fixture guarantees that ad exists) and a
+# minute with NOTHING in Redis, so the value can only come from Postgres.
+WHEN = datetime(2026, 2, 1, 10, 0, tzinfo=timezone.utc)
+
+
+async def test_metrics_reads_cold_from_postgres(client, redis_client, db_session):
+    # Arrange: a rolled-up row in Postgres only (Redis is flushed/empty). This
+    # is the case the old Redis-only endpoint got WRONG (returned 0).
+    db_session.add(ClickMetric(ad_id=TEST_AD_ID, minute_bucket=WHEN, click_count=42))
+    await db_session.commit()
+
+    resp = await client.get(
+        f"/ads/{TEST_AD_ID}/metrics",
+        params={"from": "2026-02-01T10:00:00Z", "to": "2026-02-01T10:00:00Z"},
+    )
+
+    # Assert (you): 200, one point, clicks == 42 (served from the cold tier).
+    assert resp.status_code == 200
+    points = resp.json()["points"]
+    assert len(points) == 1 and points[0]["clicks"] == 42
+
+
+async def test_metrics_redis_overlays_postgres(client, redis_client, db_session):
+    # Arrange: SAME minute present in BOTH tiers with DIFFERENT values.
+    # Postgres says 99, Redis says 7 — Redis is the fresher/live count.
+    db_session.add(ClickMetric(ad_id=TEST_AD_ID, minute_bucket=WHEN, click_count=99))
+    await db_session.commit()
+    await redis_client.zincrby(f"ad_clicks:{_minute_of(WHEN)}", 7, str(TEST_AD_ID))
+
+    resp = await client.get(
+        f"/ads/{TEST_AD_ID}/metrics",
+        params={"from": "2026-02-01T10:00:00Z", "to": "2026-02-01T10:00:00Z"},
+    )
+
+    # Assert (you): 200, one point, clicks == 7 (Redis wins the overlap, NOT 99).
+    assert resp.status_code == 200
+    points = resp.json()["points"]
+    assert len(points) == 1 and points[0]["clicks"] == 7

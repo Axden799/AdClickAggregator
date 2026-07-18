@@ -6,8 +6,12 @@ from typing import Annotated
 import redis.asyncio as redis
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database import get_db
 from app.dependencies import get_redis
+from app.models import ClickMetric
 from app.security import sign_impression
 
 router = APIRouter(prefix="/ads", tags=["ads"])
@@ -68,6 +72,7 @@ async def ad_metrics(
     from_: Annotated[datetime, Query(alias="from")],
     to: datetime,
     r: Annotated[redis.Redis, Depends(get_redis)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ):
     # Guardrails
     if from_ > to:
@@ -75,25 +80,40 @@ async def ad_metrics(
     if to - from_ > MAX_RANGE:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "range too large (max 24h)")
 
-    # TODO (you): build the per-minute timeseries. This is the mirror of the
-    # consumer's write path — same minute-bucket math, but reading with ZSCORE.
-    #   1. Convert the datetimes to minute buckets (same integer space the
-    #      consumer used):
-    #          start = int(from_.timestamp()) // 60
-    #          end   = int(to.timestamp())   // 60
-    #   2. For each minute in range(start, end + 1):
-    #        - score = await r.zscore(f"ad_clicks:{minute}", str(ad_id))
-    #        - an empty bucket returns None -> treat it as 0 clicks
-    #        - append MetricPoint(timestamp=_bucket_to_timestamp(minute),
-    #                             clicks=<the count>)
-    #   3. Leave `points` as the list you built.
-    points: list[MetricPoint] = []
     start = int(from_.timestamp()) // 60
     end = int(to.timestamp()) // 60
+
+    # --- Cold tier: one query pulls every rolled-up minute in range from
+    # Postgres. We key the result by minute-INTEGER (not datetime) so it lines
+    # up with Redis's minute space for the merge below.
+    result = await db.execute(
+        select(ClickMetric.minute_bucket, ClickMetric.click_count).where(
+            ClickMetric.ad_id == ad_id,
+            ClickMetric.minute_bucket >= from_,
+            ClickMetric.minute_bucket <= to,
+        )
+    )
+    pg_counts = {
+        int(minute_bucket.timestamp()) // 60: count
+        for minute_bucket, count in result.all()
+    }
+
+    # --- Merge: Redis (hot) overlays Postgres (cold).
+    # TODO (you): for each minute in range(start, end + 1), decide its count:
+    #   1. score = await r.zscore(f"ad_clicks:{minute}", str(ad_id))
+    #   2. if score is not None:  clicks = int(score)      # Redis WINS (freshest)
+    #      elif minute in pg_counts:  clicks = pg_counts[minute]  # else cold value
+    #      else:  clicks = 0                                # neither tier has it
+    #   3. append MetricPoint(timestamp=_bucket_to_timestamp(minute), clicks=clicks)
+    points: list[MetricPoint] = []
     for minute in range(start, end + 1):
         score = await r.zscore(f"ad_clicks:{minute}", str(ad_id))
-        clicks = int(score) if score is not None else 0
-        
+        if score is not None:
+            clicks = int(score)
+        elif minute in pg_counts:
+            clicks = pg_counts[minute]
+        else:
+            clicks = 0
         points.append(MetricPoint(timestamp=_bucket_to_timestamp(minute), clicks=clicks))
 
     return MetricsResponse(ad_id=str(ad_id), points=points)

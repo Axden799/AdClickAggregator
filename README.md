@@ -98,6 +98,57 @@ A single click, post-validation: `{ ad_id, impression_id, ts }`.
 
 ---
 
+## Data structures (sample values)
+
+How the same click looks at each stage. One click on ad 1 at 10:00:
+
+**Redis**
+
+```python
+# clicks — Stream (append-only log; id = <ms>-<seq>)
+XRANGE clicks - +
+→ [("1784500000000-0", {"ad_id": "1", "impression_id": "abc123"}), ...]
+
+# ad_clicks:{minute} — Sorted Set (member = ad_id, score = count)
+await r.zrange("ad_clicks:29742600", 0, -1, withscores=True)
+→ [("1", 2.0), ("2", 1.0)]           # ad 1: 2 clicks, ad 2: 1 click, this minute
+await r.zscore("ad_clicks:29742600", "1")  → 2.0   # or None if absent
+
+# pending_minutes — Set (flush to-do list, minute-ints as strings)
+await r.smembers("pending_minutes")  → {"29742600", "29742601"}
+
+# imp:{id} — String (dedup marker; existence = "seen", empty value, TTL)
+await r.get("imp:abc123")  → ""      # TTL ~86400s
+```
+
+**Postgres → the endpoint's merge dict**
+
+```python
+# raw query rows: list of (datetime, int) tuples
+result.all()
+→ [(datetime(2026, 3, 15, 10, 0, tzinfo=utc), 12), ...]
+
+# pg_counts — dict keyed by minute-INTEGER (so it lines up with Redis)
+→ {29742600: 12, 29742601: 30}
+```
+
+**API response** — `points` is a positional **list**, not keyed by minute:
+
+```python
+resp.json()
+→ {"ad_id": "1", "points": [
+     {"timestamp": "2026-03-15T10:00:00Z", "clicks": 12},
+     {"timestamp": "2026-03-15T10:01:00Z", "clicks": 30},
+   ]}
+# access by position, then key:  resp.json()["points"][0]["clicks"] → 12
+```
+
+> `pg_counts` is a **dict** keyed by minute-integer (a lookup: is minute X present?);
+> the response `points` is an ordered **list** for the client to plot. Same numbers,
+> different container — don't index `points` by minute.
+
+---
+
 ## Inputs and outputs
 
 ### `GET /ads/serve` — serve an ad (creates an impression)
