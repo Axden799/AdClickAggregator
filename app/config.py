@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # interval: how often the flush loop wakes to check for eligible minutes.
     flush_grace_seconds: int = 90
     flush_interval_seconds: int = 10
+    # Frontend origins allowed to call the API (browser CORS). Comma-separated
+    # so it's easy to add the deployed frontend URL via an env var later.
+    cors_origins: str = "http://localhost:5173"
 
     model_config = SettingsConfigDict(env_file=".env")
 

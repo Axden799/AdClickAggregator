@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 import redis.asyncio as redis
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.config import settings
@@ -24,6 +25,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Ad Click Aggregator", lifespan=lifespan)
+
+# Allow the React frontend (a different origin) to call this API from the
+# browser. Without this, browsers block cross-origin requests. Our endpoints
+# are GET-only and use no cookies, so no allow_credentials needed.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins.split(","),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(health.router)
 app.include_router(clicks.router)
