@@ -1,10 +1,17 @@
-# Local dev services. Grows one service per slice (Redis + Postgres now;
-# the app container comes in a later slice).
+# Full local stack: app + consumer + redis + postgres, all as containers.
+#   docker compose up --build
+# brings the whole system up; the API is at http://localhost:8000 (/docs).
 services:
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    # Healthcheck so app/consumer can wait until Redis actually answers.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
 
   postgres:
     image: postgres:16-alpine
@@ -13,11 +20,55 @@ services:
       POSTGRES_PASSWORD: adclick
       POSTGRES_DB: adclick
     # Host 5433 -> container 5432. A native Postgres already owns host 5432
-    # (used by another project), so we map to 5433 to avoid the clash.
+    # (used by another project), so we map to 5433 to avoid the clash. Containers
+    # on this network still reach postgres at the internal port 5432.
     ports:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U adclick"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    # Inside the compose network, reach the services by their NAME (redis,
+    # postgres) on their INTERNAL ports — not localhost. pydantic-settings reads
+    # these env vars, overriding the localhost defaults in config.py.
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql+asyncpg://adclick:adclick@postgres:5432/adclick
+      SECRET_KEY: dev-insecure-change-me
+    ports:
+      - "8000:8000"
+    # Migrate the schema and seed ads before serving, then start the API.
+    command: >
+      sh -c "alembic upgrade head &&
+             python -m app.seed &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  consumer:
+    build: .
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql+asyncpg://adclick:adclick@postgres:5432/adclick
+    # Same image as app, different command: run the aggregation worker.
+    command: ["python", "-m", "app.consumer"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      # Wait for the app to have run migrations before the consumer flushes.
+      app:
+        condition: service_started
 
 volumes:
   pgdata:

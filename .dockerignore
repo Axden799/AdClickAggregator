@@ -1,0 +1,10 @@
+# Keep the build context (and image) small: don't copy local-only cruft.
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.gitignore
+.env
+*.md
+scratchpad/
