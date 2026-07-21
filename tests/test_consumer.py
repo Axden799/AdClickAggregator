@@ -45,6 +45,21 @@ async def test_click_is_aggregated(redis_client):
     assert pend["pending"] == 0
 
 
+async def test_aggregated_bucket_gets_a_ttl(redis_client):
+    # Bounding Redis memory: after a click is aggregated, its minute bucket must
+    # carry a positive TTL so it eventually auto-expires (once safely flushed).
+    await ensure_group(redis_client)
+    entry_id = await redis_client.xadd(STREAM, {"ad_id": "7", "impression_id": "z"})
+    await consume_once(redis_client, block=100)
+
+    # TODO (you): TTL(key) returns seconds-to-live (-1 = no expiry, -2 = no key).
+    # Assert the bucket's TTL is positive (an expiry was set):
+    #   ttl = await redis_client.ttl(f"ad_clicks:{minute_bucket(entry_id)}")
+    #   assert ttl > 0
+    ttl = await redis_client.ttl(f"ad_clicks:{minute_bucket(entry_id)}")
+    assert ttl > 0
+
+
 async def test_second_click_same_minute_increments_to_2(redis_client):
     # TODO (you): add TWO clicks for the same ad in the same run, drain them,
     # and assert the bucket's score for that ad is 2 — proof ZINCRBY accumulates

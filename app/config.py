@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     # interval: how often the flush loop wakes to check for eligible minutes.
     flush_grace_seconds: int = 90
     flush_interval_seconds: int = 10
+    # How long a per-minute bucket lives in Redis before it auto-expires. Must
+    # comfortably exceed flush_grace_seconds so a minute is safely in Postgres
+    # first; after expiry the tiered read serves that minute from the cold tier.
+    # 3600 = 1h, matching the dashboard's last-hour hot window.
+    redis_retention_seconds: int = 3600
     # Frontend origins allowed to call the API (browser CORS). Comma-separated
     # so it's easy to add the deployed frontend URL via an env var later.
     cors_origins: str = "http://localhost:5173"

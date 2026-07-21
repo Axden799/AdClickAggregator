@@ -75,6 +75,11 @@ async def aggregate(r: redis.Redis, entry_id: str, fields: dict) -> None:
     # look at it. SADD is idempotent — touching the same minute many times
     # leaves exactly one entry.
     await r.sadd(PENDING, minute)
+    # TODO (you): bound Redis memory — give this bucket a TTL so old minutes
+    # auto-expire once they're safely flushed to Postgres. Refreshing it on
+    # each write is fine (writes cluster within the minute):
+    #   await r.expire(f"ad_clicks:{minute}", settings.redis_retention_seconds)
+    await r.expire(f"ad_clicks:{minute}", settings.redis_retention_seconds)
 
 
 async def aggregate_impression(r: redis.Redis, entry_id: str, fields: dict) -> None:
@@ -90,6 +95,9 @@ async def aggregate_impression(r: redis.Redis, entry_id: str, fields: dict) -> N
     minute = minute_bucket(entry_id)
     await r.zincrby(f"ad_impressions:{minute}", 1, fields["ad_id"])
     await r.sadd(PENDING, minute)
+    # TODO (you): same TTL as aggregate(), on the ad_impressions bucket:
+    #   await r.expire(f"ad_impressions:{minute}", settings.redis_retention_seconds)
+    await r.expire(f"ad_impressions:{minute}", settings.redis_retention_seconds)
 
 
 async def consume_once(r: redis.Redis, block: int = 5000) -> int:
