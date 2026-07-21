@@ -1,29 +1,18 @@
 import { useEffect, useState } from "react";
-import { serveAd, recordClick } from "../api.js";
-
-// How many ads to serve onto the page. Each serve records one impression and
-// gives us a signed click_url. (/ads/serve returns a random ad, so ids may
-// repeat — fine for a demo; every serve is a real impression.)
-const NUM_ADS = 4;
+import { fetchAds, recordClick } from "../api.js";
 
 export default function Landing() {
   const [ads, setAds] = useState([]);
   const [clicked, setClicked] = useState({}); // index -> true once clicked
   const [error, setError] = useState(null);
 
-  // On mount, serve NUM_ADS ads. Effects can't be async themselves, so declare
-  // an async helper inside and call it.
+  // On mount, load the whole ad board (all distinct ads, one impression each).
+  // Effects can't be async themselves, so declare an async helper and call it.
   useEffect(() => {
     async function load() {
-      // TODO (you): serve NUM_ADS ads in parallel and store them.
-      //   - Promise.all over an array of serveAd() calls
-      //   - setAds(theResultsArray)
-      //   - wrap in try/catch and setError(e.message) on failure
       try {
-        const served = await Promise.all(
-          Array.from({ length: NUM_ADS }, () => serveAd())
-        );
-        setAds(served);
+        const board = await fetchAds();
+        setAds(board);
       } catch (e) {
         setError(e.message);
       }
@@ -52,8 +41,8 @@ export default function Landing() {
     <div>
       <h1 className="mb-1 text-2xl font-bold">Featured Ads</h1>
       <p className="mb-6 text-sm text-gray-500">
-        Loading this page served {NUM_ADS} impressions. Click an ad to register a
-        click, then check the Dashboard.
+        Loading this page served {ads.length} impressions. Click an ad to register
+        a click, then check the Dashboard.
       </p>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

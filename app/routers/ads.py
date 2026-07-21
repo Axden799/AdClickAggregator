@@ -47,6 +47,28 @@ async def serve_ad(r: Annotated[redis.Redis, Depends(get_redis)]):
     return {"ad_id": ad["id"], "image_url": ad["image_url"], "click_url": click_url}
 
 
+def _serve_one(ad: dict) -> dict:
+    """Sign a fresh impression for one ad and build its click payload (no I/O)."""
+    impression_id = uuid.uuid4().hex
+    sig = sign_impression(impression_id, ad["id"])
+    return {
+        "ad_id": ad["id"],
+        "image_url": ad["image_url"],
+        "click_url": f"/click?ad_id={ad['id']}&impression_id={impression_id}&sig={sig}",
+    }
+
+
+@router.get("")
+async def list_ads(r: Annotated[redis.Redis, Depends(get_redis)]):
+    """Serve the whole ad board — every ad, once. Showing an ad IS an impression,
+    so we record one per ad (the distinct-ad mirror of /serve). The landing page
+    calls this so it shows 4 deterministic ads instead of random repeats."""
+    board = [_serve_one(ad) for ad in _FAKE_ADS]
+    for ad in board:
+        await r.xadd("impressions", {"ad_id": ad["ad_id"]})
+    return board
+
+
 # --- Metrics query path --------------------------------------------------------
 
 # The response is a per-minute timeseries. Declaring these as Pydantic models

@@ -11,6 +11,14 @@ export async function serveAd() {
   return res.json();
 }
 
+// Serve the whole ad board: every distinct ad, once (records one impression per
+// ad). Returns an array of { ad_id, image_url, click_url }.
+export async function fetchAds() {
+  const res = await fetch(`${API_URL}/ads`);
+  if (!res.ok) throw new Error(`ads failed: ${res.status}`);
+  return res.json();
+}
+
 // Register a click by following the signed click_url the serve returned. The
 // click_url is a relative path like "/click?ad_id=..&impression_id=..&sig=..".
 export async function recordClick(clickUrl) {
