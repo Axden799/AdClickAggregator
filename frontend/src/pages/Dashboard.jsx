@@ -1,8 +1,28 @@
 import { useEffect, useState } from "react";
 import { fetchMetrics } from "../api.js";
+import ClicksChart from "../components/ClicksChart.jsx";
 
 // The ads we show. (Ids match the seeded ads / the serve list.)
 const AD_IDS = [1, 2, 3, 4];
+
+// Build the chart series: total clicks per minute across all ads. Every ad's
+// response covers the same window, so points line up by index i.
+function toClicksSeries(results) {
+  // TODO (you): return an array of { time, clicks }, one per minute.
+  //   results[0].points gives the timestamps; for each index i, sum the clicks
+  //   from all four ads at that same index.
+  //
+  //   return results[0].points.map((p, i) => {
+  //     let clicks = 0;
+  //     for (const r of results) clicks += r.points[i].clicks;
+  //     return { time: p.timestamp, clicks };
+  //   });
+  return results[0].points.map((p, i) => {
+    let clicks = 0;
+    for (const r of results) clicks += r.points[i].clicks;
+    return { time: p.timestamp, clicks };
+  })
+}
 
 // Collapse one ad's per-minute metrics response into a single totals row.
 // A response looks like { ad_id, points: [{ timestamp, clicks, impressions, ctr }, ...] }.
@@ -20,6 +40,7 @@ function summarize(metrics) {
 
 export default function Dashboard() {
   const [rows, setRows] = useState([]);
+  const [series, setSeries] = useState([]);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
@@ -37,6 +58,7 @@ export default function Dashboard() {
         AD_IDS.map((id) => fetchMetrics(id, from, to)),
       );
       setRows(results.map((m) => ({ adId: m.ad_id, ...summarize(m) })));
+      setSeries(toClicksSeries(results));
     } catch (e) {
       setError(e.message);
     } finally {
@@ -87,6 +109,8 @@ export default function Dashboard() {
           ))}
         </tbody>
       </table>
+
+      {series.length > 0 && <ClicksChart data={series} />}
     </div>
   );
 }

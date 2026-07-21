@@ -1,1 +1,16 @@
 @import "tailwindcss";
+
+/* Chart design tokens (from the validated reference data-viz palette). Slot-1
+   blue for the single series; recessive grid + muted axis ink. Theme-aware. */
+.viz-root {
+  --series-1: #2a78d6;
+  --grid: #e1e0d9;
+  --muted: #898781;
+}
+@media (prefers-color-scheme: dark) {
+  .viz-root {
+    --series-1: #3987e5;
+    --grid: #2c2c2a;
+    --muted: #898781;
+  }
+}
