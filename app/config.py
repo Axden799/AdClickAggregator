@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +36,17 @@ class Settings(BaseSettings):
     # Frontend origins allowed to call the API (browser CORS). Comma-separated
     # so it's easy to add the deployed frontend URL via an env var later.
     cors_origins: str = "http://localhost:5173"
+
+    @field_validator("database_url")
+    @classmethod
+    def _use_asyncpg_driver(cls, v: str) -> str:
+        """Managed hosts (Railway, Heroku, RDS) hand out `postgresql://` (or the
+        legacy `postgres://`); our async stack needs the `+asyncpg` driver. Rewrite
+        the scheme so the SAME url works locally and on any host without editing."""
+        for prefix in ("postgresql://", "postgres://"):
+            if v.startswith(prefix):
+                return "postgresql+asyncpg://" + v[len(prefix):]
+        return v
 
     model_config = SettingsConfigDict(env_file=".env")
 
