@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db
 from app.dependencies import get_redis
 from app.models import ClickMetric
@@ -43,7 +44,12 @@ async def serve_ad(r: Annotated[redis.Redis, Depends(get_redis)]):
     # the consumer counts it, exactly like /click emits onto the clicks stream.
     # TODO (you): XADD to the "impressions" stream with {"ad_id": ad["id"]}.
     #   await r.xadd("impressions", {"ad_id": ad["id"]})
-    await r.xadd("impressions", {"ad_id": ad["id"]})
+    await r.xadd(
+        "impressions",
+        {"ad_id": ad["id"]},
+        maxlen=settings.stream_maxlen,
+        approximate=True,
+    )
     return {"ad_id": ad["id"], "image_url": ad["image_url"], "click_url": click_url}
 
 
@@ -65,7 +71,12 @@ async def list_ads(r: Annotated[redis.Redis, Depends(get_redis)]):
     calls this so it shows 4 deterministic ads instead of random repeats."""
     board = [_serve_one(ad) for ad in _FAKE_ADS]
     for ad in board:
-        await r.xadd("impressions", {"ad_id": ad["ad_id"]})
+        await r.xadd(
+            "impressions",
+            {"ad_id": ad["ad_id"]},
+            maxlen=settings.stream_maxlen,
+            approximate=True,
+        )
     return board
 
 

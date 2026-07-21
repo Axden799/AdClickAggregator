@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     # first; after expiry the tiered read serves that minute from the cold tier.
     # 3600 = 1h, matching the dashboard's last-hour hot window.
     redis_retention_seconds: int = 3600
+    # Cap the raw event streams (clicks, impressions) so they don't grow forever
+    # (XACK acknowledges but doesn't delete entries). Entries are only useful
+    # until the consumer processes them — seconds — so ~10k is huge headroom.
+    stream_maxlen: int = 10_000
     # Frontend origins allowed to call the API (browser CORS). Comma-separated
     # so it's easy to add the deployed frontend URL via an env var later.
     cors_origins: str = "http://localhost:5173"

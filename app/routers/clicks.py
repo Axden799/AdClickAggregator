@@ -38,6 +38,12 @@ async def click(
         # Replay — already counted. Silent, indistinguishable no-op (no XADD).
         return {"status": "accepted"}
 
-    # First time we've seen this impression — count it.
-    await r.xadd("clicks", {"ad_id": ad_id, "impression_id": impression_id})
+    # First time we've seen this impression — count it. maxlen+approximate keeps
+    # the stream bounded: Redis trims old entries in whole blocks (the ~ form).
+    await r.xadd(
+        "clicks",
+        {"ad_id": ad_id, "impression_id": impression_id},
+        maxlen=settings.stream_maxlen,
+        approximate=True,
+    )
     return {"status": "accepted"}
