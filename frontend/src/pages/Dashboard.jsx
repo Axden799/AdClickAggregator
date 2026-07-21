@@ -8,15 +8,6 @@ const AD_IDS = [1, 2, 3, 4];
 // Build the chart series: total clicks per minute across all ads. Every ad's
 // response covers the same window, so points line up by index i.
 function toClicksSeries(results) {
-  // TODO (you): return an array of { time, clicks }, one per minute.
-  //   results[0].points gives the timestamps; for each index i, sum the clicks
-  //   from all four ads at that same index.
-  //
-  //   return results[0].points.map((p, i) => {
-  //     let clicks = 0;
-  //     for (const r of results) clicks += r.points[i].clicks;
-  //     return { time: p.timestamp, clicks };
-  //   });
   return results[0].points.map((p, i) => {
     let clicks = 0;
     for (const r of results) clicks += r.points[i].clicks;
