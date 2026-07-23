@@ -5,14 +5,16 @@ In a loop, it serves a burst of impressions and clicks a small random fraction
 of them (realistic low CTR). It only uses the public HTTP API — the same signed
 serve -> click flow a real browser follows — so it also exercises the full path.
 
-    python -m app.simulate                          # against localhost:8000
-    AD_API_URL=https://your-api python -m app.simulate   # against a deployed API
+    python -m app.simulate                # continuous forever-loop (worker service)
+    python -m app.simulate --once         # ONE burst, then exit (for a cron job)
+    AD_API_URL=https://your-api python -m app.simulate   # target a deployed API
 """
 
 import asyncio
 import logging
 import os
 import random
+import sys
 
 import httpx
 
@@ -56,5 +58,16 @@ async def run() -> None:
             await asyncio.sleep(random.uniform(*BURST_INTERVAL))
 
 
+async def run_once() -> None:
+    """A single burst, then exit — for a scheduled (cron) deployment. Railway
+    runs this on a schedule; the container spins up, fires one burst, and stops."""
+    log.info("one-shot burst against %s", BASE_URL)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await burst(client)
+
+
 if __name__ == "__main__":
-    asyncio.run(run())
+    if "--once" in sys.argv:
+        asyncio.run(run_once())   # cron mode
+    else:
+        asyncio.run(run())        # continuous mode
