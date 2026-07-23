@@ -1,5 +1,9 @@
 # Ad Click Aggregator
 
+**Live demo:** [ad-click-aggregator.vercel.app](https://ad-click-aggregator.vercel.app) &nbsp;·&nbsp; **API docs:** [/docs](https://agile-harmony-production-8121.up.railway.app/docs) &nbsp;·&nbsp; **Health:** [/health](https://agile-harmony-production-8121.up.railway.app/health)
+
+> Frontend on Vercel, backend (API + aggregation worker + PostgreSQL + Redis) on Railway.
+
 A real-time ad-click analytics pipeline built as a backend portfolio project. It ingests ad clicks at the write-spike-friendly rate of a real ad network, deduplicates them, aggregates them into per-minute windows in real time, and exposes the rolled-up metrics through an analytics API and dashboard.
 
 The design is adapted from the [HelloInterview Ad Click Aggregator](https://www.hellointerview.com/learn/system-design/problem-breakdowns/ad-click-aggregator) system-design problem, deliberately scaled down to a **single-node, portfolio-grade deployment** (no Kafka, no Flink, no OLAP store, no load balancer, no sharding). Where the production design would reach for heavy distributed infrastructure, this project implements the same *patterns* with lighter tools and documents the scale-up path instead of building it. Knowing when **not** to reach for the heavy tool is part of the point.
@@ -367,13 +371,14 @@ SELECT ad_id, minute_bucket, click_count FROM click_metric ORDER BY minute_bucke
 | Serve endpoint + HMAC impression signing | Done |
 | Click ingestion (verify → dedup → XADD) | Done |
 | Aggregation consumer (XREADGROUP → ZINCRBY sorted sets → XACK) | Done |
-| Async test suite (10 tests: health, HMAC, ingestion/dedup, consumer) | Done |
-| Docker Compose (Redis service) | Done |
-| Metrics query — Redis hot-read path | In progress |
-| Click → destination `302` redirect | Not started |
-| Data model (`Ad`, `ClickMetric`) + Alembic migrations | Not started |
-| Consumer flush to Postgres (cold storage) + sorted-set retention | Not started |
-| Metrics query — Postgres cold path | Not started |
-| Load simulator | Not started |
-| Frontend (ad + analytics chart) | Not started |
-| Full Docker Compose stack (app + consumer + Redis + Postgres) | Not started |
+| Data model (`Ad`, `ClickMetric`) + Alembic migrations | Done |
+| Consumer flush to Postgres (watermark) + sorted-set retention TTL | Done |
+| Impression counting + CTR | Done |
+| Metrics query — tiered read (Redis hot overlays Postgres cold) | Done |
+| Stream trimming (bounded raw-event streams) | Done |
+| Load simulator (`app/simulate.py`) | Done |
+| React frontend — landing board + dashboard table + per-minute chart | Done |
+| Full Docker Compose stack (app + consumer + Redis + Postgres) | Done |
+| Async test suite (23 tests) | Done |
+| **Deployed** — Vercel (frontend) + Railway (API, worker, Postgres, Redis) | Done |
+| Click → destination `302` redirect | Not started (returns 202; deliberate) |
