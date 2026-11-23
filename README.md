@@ -18,19 +18,21 @@ The design is adapted from the [HelloInterview Ad Click Aggregator](https://www.
 - **Redis SET / bloom filter** for impression-ID deduplication
 - **HMAC-signed impressions** to reject spoofed/forged clicks
 - **FastAPI + async SQLAlchemy + asyncpg** for ingestion, querying, and durable rollups
-- **A load simulator** so the write-spike absorption is actually visible in a demo
+- **A load simulator** that keeps the live demo populated with realistic traffic
 
 ---
 
 ## Status
 
-This README describes the **full target design**. The project is built incrementally — one thin vertical slice per commit — and roughly half the pipeline is implemented today:
+**Complete and deployed.** The full pipeline is built, tested (23-test async suite), and running live: frontend on Vercel; API, aggregation worker, PostgreSQL, and Redis on Railway. It was built incrementally, one thin vertical slice per commit.
 
-- **Working now:** the serve endpoint with HMAC-signed impressions, click ingestion (HMAC verify → impression dedup → `XADD`), and the async aggregation consumer (consumer-group `XREADGROUP` → `ZINCRBY` into per-minute sorted sets → `XACK`) — all covered by a 10-test async suite.
-- **In progress:** the metrics query endpoint (`GET /ads/{ad_id}/metrics`) — the Redis sorted-set read path.
-- **Designed, not yet built:** PostgreSQL `Ad`/`ClickMetric` models + migrations, the consumer's flush to Postgres and sorted-set retention, the click→destination `302` redirect, the load simulator, the frontend, and the full multi-service Docker Compose stack.
+- **Ingestion:** serve endpoint with HMAC-signed impressions → click ingestion (HMAC verify → impression dedup → `XADD`), with bounded (trimmed) streams.
+- **Aggregation:** async consumer group (`XREADGROUP` → `ZINCRBY` into per-minute sorted sets → `XACK`), flushing roll-ups to PostgreSQL on a watermark, with TTL retention on the Redis buckets.
+- **Query:** `GET /ads/{ad_id}/metrics` serves clicks, impressions, and CTR with a tiered read: recent minutes from Redis overlaid on older minutes from Postgres.
+- **Frontend:** React dashboard with a live ad board, per-ad clicks / impressions / CTR, and a per-minute clicks chart.
+- **Load simulator:** standalone traffic bot (`app/simulate.py`) that keeps the live demo populated.
 
-See [Build status](#build-status) for the exact ledger. Note that some behaviors below describe the target (e.g. `/click` will `302`-redirect once the `Ad` model exists; today it returns `202 Accepted`).
+One deliberate deviation from the design below: `/click` returns `202 Accepted` instead of `302`-redirecting to the ad's destination. See [Build status](#build-status) for the full ledger.
 
 ---
 
@@ -186,9 +188,14 @@ resp.json()
 ```
 Recent minutes served from Redis sorted sets; older minutes from Postgres.
 
-### `POST /simulate` — load generator (demo only)
-**Input:** `{ "ad_id": 42, "count": 10000, "duplicate_rate": 0.1 }`
-**Output:** `202 Accepted`; fires N synthetic signed clicks (a fraction duplicated to exercise dedup) so the dashboard visibly absorbs the spike.
+### Load simulator — `app/simulate.py` (standalone script, not an endpoint)
+A traffic bot that keeps the live demo populated. Each burst serves 5–20 impressions through `GET /ads/serve` and clicks about 8% of them through their signed `click_url`, which is the same path a real browser takes, so it exercises the whole pipeline at a realistic CTR.
+
+```bash
+python -m app.simulate                                  # continuous loop, a burst every 30–90 s
+python -m app.simulate --once                           # one burst, then exit (run on a cron schedule)
+AD_API_URL=https://your-api python -m app.simulate      # target a deployed API
+```
 
 ---
 
@@ -250,7 +257,7 @@ Recent minutes served from Redis sorted sets; older minutes from Postgres.
 
 | Package | Role in this project |
 |---|---|
-| **fastapi** / **starlette** | Async REST API: `/ads/serve`, `/click`, `/metrics`, `/simulate` |
+| **fastapi** / **starlette** | Async REST API: `/ads/serve`, `/click`, `/metrics` |
 | **uvicorn** (+ **uvloop**, **httptools**) | ASGI server running the app; uvloop/httptools for throughput |
 | **fastapi-cli** | Provides the `fastapi dev` / `fastapi run` commands (installed via `fastapi[standard]`) |
 | **pydantic** / **pydantic-settings** | Request/response validation; typed config from `.env` |
